@@ -61,7 +61,6 @@ DEFAULT_PORTS = {
 
 class SimpleSwitch13(app_manager.RyuApp):
     """Learning-switch + regras QUIC-sim para Experimentos 4/5."""
-
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
@@ -77,25 +76,25 @@ class SimpleSwitch13(app_manager.RyuApp):
     # -----------------------------
     # PacketOut compatível (CORRIGE seus erros)
     # -----------------------------
-    def send_packet_out(self, datapath, msg, in_port: int, actions):
-        """
-        Envia PacketOut de forma compatível com variações do Ryu:
-        - Usa argumentos posicionais
-        - Força buffer_id = OFP_NO_BUFFER quando enviamos data
-        """
+
+    def _packet_out(self, datapath, msg, in_port, actions):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # Sempre enviamos data; então buffer_id deve ser OFP_NO_BUFFER
-        data = msg.data
+    # SEMPRE inicializa
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+
         out = parser.OFPPacketOut(
-            datapath,                 # datapath
-            ofproto.OFP_NO_BUFFER,    # buffer_id (0xffffffff)
-            in_port,                  # in_port
-            actions,                  # actions
-            data                      # data
+            datapath,
+            msg.buffer_id,   # posicional
+            in_port,
+            actions,
+            data
         )
         datapath.send_msg(out)
+    
 
     # -----------------------------
     # Utilitários de flows
@@ -108,6 +107,7 @@ class SimpleSwitch13(app_manager.RyuApp):
         actions,
         idle_timeout: int = 0,
         hard_timeout: int = 0,
+        buffer_id: Optional[int] = None,
     ):
         """Instala uma regra de fluxo no switch."""
         ofproto = datapath.ofproto
@@ -121,6 +121,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             instructions=inst,
             idle_timeout=idle_timeout,
             hard_timeout=hard_timeout,
+            buffer_id=(ofproto.OFP_NO_BUFFER if buffer_id is None else buffer_id),
         )
         datapath.send_msg(mod)
 
@@ -134,6 +135,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             out_port=ofproto.OFPP_ANY,
             out_group=ofproto.OFPG_ANY,
             match=match,
+            buffer_id=(ofproto.OFP_NO_BUFFER if buffer_id is None else buffer_id),
         )
         datapath.send_msg(mod)
 
@@ -333,16 +335,26 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         # --- ARP SEMPRE ---
         if eth.ethertype == ether_types.ETH_TYPE_ARP:
-            out_port = self.mac_to_port[dpid].get(dst, ofproto.OFPP_FLOOD)
-            actions = [parser.OFPActionOutput(out_port)]
-            self.send_packet_out(datapath, msg, in_port, actions)
+            #out_port = self.mac_to_port[dpid].get(dst, ofproto.OFPP_FLOOD)
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            self.s_packet_out(datapath, msg, in_port, actions)
             return
 
         # --- QUIC (Exp 4/5) ---
         if self._is_quic_packet(pkt):
             out_port = self._route_quic_out_port(dpid, eth_src=src, eth_dst=dst)
             if out_port is not None:
-                actions = [parser.OFPActionOutput(out_port)]
+                if EXPERIMENT == 4 and (
+                    (dpid == 1 and out_port == self.ports[1]["to_s2"]) or
+                    (dpid == 1 and out_port == self.ports[1]["to_s3"])
+                ):
+                    # Força ECMP no Exp. 4
+                    out_port_s2 = self.ports[dpid]["to_s2"]
+                    out_port_s3 = self.ports[dpid]["to_s3"]
+                    actions = [parser.OFPActionOutput(random.choice([out_port_s2, out_port_s3]))]
+                else:
+                    actions = [parser.OFPActionOutput(out_port)]
+                
                 match = self._quic_direction_match(parser, eth_src=src, eth_dst=dst)
 
                 if match is not None:
@@ -356,7 +368,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                         hard_timeout=hard_timeout,
                     )
 
-                self.send_packet_out(datapath, msg, in_port, actions)
+                self._packet_out(datapath, msg, in_port, actions)
                 return
             # se não decide, cai no baseline
 
@@ -370,6 +382,10 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_src=src, eth_dst=dst)
-            self.add_flow(datapath, priority=1, match=match, actions=actions)
+            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                self.add_flow(datapath, 1, match, actions, buffer_id=msg.buffer_id)
+                return
+            else:
+                self.add_flow(datapath, 1, match, actions)
 
-        self.send_packet_out(datapath, msg, in_port, actions)
+        self._packet_out(datapath, msg, in_port, actions)
