@@ -5,6 +5,8 @@
 # - Cada pacote tem seq
 # - Mede RTT
 # - Retransmite em caso de timeout
+import base64
+import os
 
 import socket
 import json
@@ -20,6 +22,9 @@ SERVER_PORT = 4433
 TIMEOUT = 1.0       # timeout para esperar ACK
 MAX_RETRIES = 3     # retransmissões por pacote
 NUM_DATA_PKTS = 5   # quantos pacotes de dados enviar
+
+FILE_TO_SEND = "teste_sdn.txt"  # ajuste para o arquivo que você quiser
+CHUNK_SIZE = 1024                   # bytes por chunk
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.settimeout(TIMEOUT)
@@ -45,7 +50,7 @@ def send_and_wait_ack(pkt, server_addr):
             recv_time = time.time()
             rtt = recv_time - send_time
 
-            resp = json.loads(data.decode("utf-8", errors="ignore")))
+            resp = json.loads(data.decode())
             if resp.get("type") == "ack" and resp.get("seq") == seq:
                 print(f"[ACK OK] seq={seq}, rtt={rtt:.3f}s, resp={resp}")
                 return True, rtt
@@ -56,6 +61,17 @@ def send_and_wait_ack(pkt, server_addr):
 
     print(f"[FALHA] seq={seq} sem ACK após {MAX_RETRIES} tentativas")
     return False, None
+
+def load_file_chunks(filename, chunk_size=1024):
+    """Lê o arquivo em binário e retorna lista de chunks (bytes)."""
+    with open(filename, "rb") as f:
+        data = f.read()
+
+    chunks = [
+        data[i:i + chunk_size]
+        for i in range(0, len(data), chunk_size)
+    ]
+    return chunks
 
 
 def main():
@@ -74,6 +90,36 @@ def main():
     if not ok:
         print("[CLIENTE] Handshake falhou, encerrando.")
         return
+    
+    # --- ENVIO DE ARQUIVO (NOVO) ---
+    if not os.path.exists(FILE_TO_SEND):
+        print(f"[CLIENTE] Arquivo {FILE_TO_SEND} não encontrado, pulando envio de arquivo.")
+        return
+
+    chunks = load_file_chunks(FILE_TO_SEND, CHUNK_SIZE)
+    total = len(chunks)
+    print(f"[CLIENTE] Enviando arquivo {FILE_TO_SEND} em {total} chunks de até {CHUNK_SIZE} bytes.")
+
+    seq_base = 1000  # só para separar da sequência dos outros pacotes
+
+    for i, raw_chunk in enumerate(chunks):
+        seq = seq_base + i
+        b64_chunk = base64.b64encode(raw_chunk).decode()
+
+        pkt = {
+            "type": "file_chunk",
+            "seq": seq,
+            "total": total,
+            "filename": os.path.basename(FILE_TO_SEND),
+            "data": b64_chunk,
+        }
+
+        ok, rtt = send_and_wait_ack(pkt, server_addr)
+        if not ok:
+            print(f"[CLIENTE] Falha ao enviar chunk seq={seq}. Encerrando transmissão de arquivo.")
+            break
+
+    print("[CLIENTE] Fim da transmissão do arquivo.")
 
     # Envio de pacotes de dados
     for i in range(1, NUM_DATA_PKTS + 1):
