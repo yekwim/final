@@ -6,12 +6,10 @@
 # - Simula perda de pacotes
 # - Responde com ACK contendo o seq
 
-<<<<<<< HEAD
 import base64
 from collections import defaultdict
 
-=======
->>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
+
 import socket
 import json
 import random
@@ -32,7 +30,7 @@ sock.bind((HOST, PORT))
 print(f"[SERVIDOR] QUIC-sim escutando em {HOST}:{PORT}")
 print(f"[SERVIDOR] LOSS_PROB={LOSS_PROB}, MAX_DELAY={MAX_DELAY}s")
 
-<<<<<<< HEAD
+
 def rebuild_file(filename, file_info):
     """Reconstrói o arquivo a partir dos chunks recebidos."""
     chunks_dict = file_info["chunks"]
@@ -53,8 +51,6 @@ def rebuild_file(filename, file_info):
 # Armazena chunks por arquivo: filename -> { "total": int, "chunks": {seq: bytes} }
 files_state = defaultdict(lambda: {"total": None, "chunks": {}})
 
-=======
->>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
 while True:
     data, addr = sock.recvfrom(2048)
     now = time.time()
@@ -78,7 +74,7 @@ while True:
     delay = random.uniform(0, MAX_DELAY)
     time.sleep(delay)
 
-<<<<<<< HEAD
+
     # --- NOVO: tratamento de file_chunk ---
     if ptype == "file_chunk":
         filename = packet.get("filename", "arquivo.bin")
@@ -112,8 +108,7 @@ while True:
         # Já tratamos este tipo de pacote, volta pro início do loop
         continue
 
-=======
->>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
+
     response = {
         "type": "ack",
         "seq": seq,
