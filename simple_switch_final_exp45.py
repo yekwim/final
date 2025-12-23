@@ -20,6 +20,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cl
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
+from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import udp
 from ryu.lib.packet import ether_types
@@ -70,6 +71,12 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.port_state: Dict[Tuple[int, int], bool] = {}
         self.datapaths: Dict[int, object] = {}
         self.ports = DEFAULT_PORTS
+        # ARP proxy / anti-storm
+        self.ip_to_mac: Dict[str, str] = {
+            '10.0.0.1': '00:00:00:00:00:01',
+            '10.0.0.2': '00:00:00:00:00:02',
+        }
+        self.seen_arp: set = set()
 
         self.logger.info("== Controlador iniciado (EXPERIMENT=%s) ==", EXPERIMENT)
 
@@ -107,8 +114,8 @@ class SimpleSwitch13(app_manager.RyuApp):
         actions,
         idle_timeout: int = 0,
         hard_timeout: int = 0,
-        buffer_id: Optional[int] = None,
-    ):
+        buffer_id=None,
+):
         """Instala uma regra de fluxo no switch."""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -116,12 +123,12 @@ class SimpleSwitch13(app_manager.RyuApp):
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
             datapath=datapath,
+            buffer_id=(datapath.ofproto.OFP_NO_BUFFER if buffer_id is None else buffer_id),
             priority=priority,
             match=match,
             instructions=inst,
             idle_timeout=idle_timeout,
             hard_timeout=hard_timeout,
-            buffer_id=(ofproto.OFP_NO_BUFFER if buffer_id is None else buffer_id),
         )
         datapath.send_msg(mod)
 
@@ -135,7 +142,6 @@ class SimpleSwitch13(app_manager.RyuApp):
             out_port=ofproto.OFPP_ANY,
             out_group=ofproto.OFPG_ANY,
             match=match,
-            buffer_id=(ofproto.OFP_NO_BUFFER if buffer_id is None else buffer_id),
         )
         datapath.send_msg(mod)
 
@@ -333,11 +339,49 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # --- ARP SEMPRE ---
+        # --- ARP (evita broadcast storm em topologia em malha) ---
         if eth.ethertype == ether_types.ETH_TYPE_ARP:
-            #out_port = self.mac_to_port[dpid].get(dst, ofproto.OFPP_FLOOD)
+            arp_pkt = pkt.get_protocol(arp.arp)
+            if arp_pkt:
+                # aprende IP->MAC do remetente
+                self.ip_to_mac[arp_pkt.src_ip] = arp_pkt.src_mac
+
+                # se for ARP request e já conhecemos o MAC do alvo, responde localmente (proxy ARP)
+                if arp_pkt.opcode == arp.ARP_REQUEST and arp_pkt.dst_ip in self.ip_to_mac:
+                    dst_mac = self.ip_to_mac[arp_pkt.dst_ip]
+                    e = ethernet.ethernet(dst=arp_pkt.src_mac, src=dst_mac, ethertype=ether_types.ETH_TYPE_ARP)
+                    a = arp.arp(
+                        opcode=arp.ARP_REPLY,
+                        src_mac=dst_mac,
+                        src_ip=arp_pkt.dst_ip,
+                        dst_mac=arp_pkt.src_mac,
+                        dst_ip=arp_pkt.src_ip,
+                    )
+                    p = packet.Packet()
+                    p.add_protocol(e)
+                    p.add_protocol(a)
+                    p.serialize()
+
+                    actions = [parser.OFPActionOutput(in_port)]
+                    out = parser.OFPPacketOut(
+                        datapath=datapath,
+                        buffer_id=ofproto.OFP_NO_BUFFER,
+                        in_port=ofproto.OFPP_CONTROLLER,
+                        actions=actions,
+                        data=p.data,
+                    )
+                    datapath.send_msg(out)
+                    return
+
+            # fallback: se não conhecemos, envia para o controlador só uma vez por switch+src_ip
+            # (reduz tempestade em malha)
+            key = (dpid, getattr(arp_pkt, "src_ip", src))
+            if key in self.seen_arp:
+                return
+            self.seen_arp.add(key)
+
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-            self.s_packet_out(datapath, msg, in_port, actions)
+            self._packet_out(datapath, msg, in_port, actions)
             return
 
         # --- QUIC (Exp 4/5) ---
