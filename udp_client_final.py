@@ -5,8 +5,11 @@
 # - Cada pacote tem seq
 # - Mede RTT
 # - Retransmite em caso de timeout
+<<<<<<< HEAD
 import base64
 import os
+=======
+>>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
 
 import socket
 import json
@@ -23,9 +26,12 @@ TIMEOUT = 1.0       # timeout para esperar ACK
 MAX_RETRIES = 3     # retransmissões por pacote
 NUM_DATA_PKTS = 5   # quantos pacotes de dados enviar
 
+<<<<<<< HEAD
 FILE_TO_SEND = "teste_sdn.txt"  # ajuste para o arquivo que você quiser
 CHUNK_SIZE = 1024                   # bytes por chunk
 
+=======
+>>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.settimeout(TIMEOUT)
 
@@ -62,6 +68,7 @@ def send_and_wait_ack(pkt, server_addr):
     print(f"[FALHA] seq={seq} sem ACK após {MAX_RETRIES} tentativas")
     return False, None
 
+<<<<<<< HEAD
 def load_file_chunks(filename, chunk_size=1024):
     """Lê o arquivo em binário e retorna lista de chunks (bytes)."""
     with open(filename, "rb") as f:
@@ -73,6 +80,8 @@ def load_file_chunks(filename, chunk_size=1024):
     ]
     return chunks
 
+=======
+>>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
 
 def main():
     server_addr = (SERVER_IP, SERVER_PORT)
@@ -90,6 +99,7 @@ def main():
     if not ok:
         print("[CLIENTE] Handshake falhou, encerrando.")
         return
+<<<<<<< HEAD
     
     # --- ENVIO DE ARQUIVO (NOVO) ---
     if not os.path.exists(FILE_TO_SEND):
@@ -120,6 +130,8 @@ def main():
             break
 
     print("[CLIENTE] Fim da transmissão do arquivo.")
+=======
+>>>>>>> d1b07b00bf5fcc4c360fe147212669ed8bf2f4a3
 
     # Envio de pacotes de dados
     for i in range(1, NUM_DATA_PKTS + 1):
