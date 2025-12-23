@@ -1,8 +1,10 @@
 # simple_switch_final.py
 #
-# Controlador SDN (Ryu / OpenFlow 1.3) para os Experimentos 4 e 5:
-#   - Exp. 4 (ECMP-sim): Alterna caminhos entre s2 e s3 usando hard_timeout=1.
-#   - Exp. 5 (Falha de link): Redireciona tráfego via s3 se s1-s2 cair.
+# Controlador SDN (Ryu / OpenFlow 1.3) baseado em learning-switch,
+# com suporte aos Experimentos 4 e 5 do enunciado:
+#
+#   - Exp. 4 (ECMP-sim): alterna dinamicamente entre s2 e s3
+#   - Exp. 5 (Falha de link): se link s1-s2 cair, redireciona para rota via s3
 
 from __future__ import annotations
 import os
@@ -13,15 +15,17 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet, ipv4, udp, ether_types
+from ryu.lib.packet import packet
+from ryu.lib.packet import ethernet
+from ryu.lib.packet import ipv4
+from ryu.lib.packet import udp
+from ryu.lib.packet import ether_types
 
-# --- Configurações ---
 EXPERIMENT = int(os.environ.get("EXPERIMENT", "4"))
 QUIC_UDP_PORT = 4433
 H1_MAC = os.environ.get("H1_MAC", "00:00:00:00:00:01")
 H2_MAC = os.environ.get("H2_MAC", "00:00:00:00:00:02")
 
-# Mapeamento de portas baseado no topo_malha.py
 DEFAULT_PORTS = {
     1: {"to_s2": 1, "to_s3": 2, "to_h1": 3},
     2: {"to_s1": 1, "to_s4": 2},
@@ -38,24 +42,77 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.port_state: Dict[Tuple[int, int], bool] = {}
         self.datapaths: Dict[int, object] = {}
         self.ports = DEFAULT_PORTS
-        self.logger.info("== Controlador Pronto (EXPERIMENT=%s) ==", EXPERIMENT)
+        self.logger.info("== Controlador iniciado (EXPERIMENT=%s) ==", EXPERIMENT)
 
-    # --- Utilitários de Fluxo ---
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0, hard_timeout=0):
+    def _packet_out(self, datapath, msg, in_port, actions):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+        try:
+            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                      in_port=in_port, actions=actions, data=data)
+        except TypeError:
+            out = parser.OFPPacketOut(datapath, msg.buffer_id, in_port, actions, data)
+        datapath.send_msg(out)
+
+    def add_flow(self, datapath, priority, match, actions,
+                 buffer_id=None, idle_timeout=0, hard_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        
-        if buffer_id is not None:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                    priority=priority, match=match,
-                                    instructions=inst, idle_timeout=idle_timeout,
-                                    hard_timeout=hard_timeout)
-        else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst,
-                                    idle_timeout=idle_timeout,
-                                    hard_timeout=hard_timeout)
+
+        try:
+            if buffer_id is not None:
+                mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
+                                        priority=priority, match=match,
+                                        instructions=inst,
+                                        idle_timeout=idle_timeout,
+                                        hard_timeout=hard_timeout)
+            else:
+                mod = parser.OFPFlowMod(datapath=datapath,
+                                        priority=priority, match=match,
+                                        instructions=inst,
+                                        idle_timeout=idle_timeout,
+                                        hard_timeout=hard_timeout)
+            datapath.send_msg(mod)
+            return
+        except TypeError:
+            pass
+
+        try:
+            if buffer_id is not None:
+                mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
+                                        priority=priority, match=match,
+                                        inst=inst,
+                                        idle_timeout=idle_timeout,
+                                        hard_timeout=hard_timeout)
+            else:
+                mod = parser.OFPFlowMod(datapath=datapath,
+                                        priority=priority, match=match,
+                                        inst=inst,
+                                        idle_timeout=idle_timeout,
+                                        hard_timeout=hard_timeout)
+            datapath.send_msg(mod)
+            return
+        except TypeError:
+            pass
+
+        cookie = 0
+        cookie_mask = 0
+        table_id = 0
+        command = ofproto.OFPFC_ADD
+        out_port = ofproto.OFPP_ANY
+        out_group = ofproto.OFPG_ANY
+        flags = 0
+
+        if buffer_id is None:
+            buffer_id = ofproto.OFP_NO_BUFFER
+
+        mod = parser.OFPFlowMod(datapath, cookie, cookie_mask, table_id, command,
+                                idle_timeout, hard_timeout, priority, buffer_id,
+                                out_port, out_group, flags, match, inst)
         datapath.send_msg(mod)
 
     def del_flow(self, datapath, match):
@@ -66,101 +123,139 @@ class SimpleSwitch13(app_manager.RyuApp):
                                 match=match)
         datapath.send_msg(mod)
 
-    def send_packet_out(self, datapath, msg, in_port, actions):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
-
-    # --- Lógica de Roteamento ---
-    def _is_port_up(self, dpid, port_no):
+    def _is_port_up(self, dpid: int, port_no: int) -> bool:
         return self.port_state.get((dpid, port_no), True)
 
-    def _is_link_s1_s2_up(self):
-        return self._is_port_up(1, self.ports[1]["to_s2"]) and self._is_port_up(2, self.ports[2]["to_s1"])
+    def _is_link_s1_s2_up(self) -> bool:
+        p_s1_to_s2 = self.ports[1]["to_s2"]
+        p_s2_to_s1 = self.ports[2]["to_s1"]
+        return self._is_port_up(1, p_s1_to_s2) and self._is_port_up(2, p_s2_to_s1)
 
-    def _route_quic(self, dpid, eth_src, eth_dst):
+    def _choose_ecmp_port(self, dpid: int, candidates: Tuple[int, int]) -> int:
+        p1, p2 = candidates
+        p1_up = self._is_port_up(dpid, p1)
+        p2_up = self._is_port_up(dpid, p2)
+        if p1_up and p2_up: return random.choice([p1, p2])
+        if p1_up: return p1
+        if p2_up: return p2
+        return p2
+
+    def _route_quic_out_port(self, dpid: int, eth_src: str, eth_dst: str, in_port: int) -> Optional[int]:
         p = self.ports.get(dpid, {})
         h1_to_h2 = (eth_src == H1_MAC and eth_dst == H2_MAC)
         h2_to_h1 = (eth_src == H2_MAC and eth_dst == H1_MAC)
 
         if dpid == 1:
             if h1_to_h2:
-                if EXPERIMENT == 4: return random.choice([p["to_s2"], p["to_s3"]])
+                if EXPERIMENT == 4: return self._choose_ecmp_port(dpid, (p["to_s2"], p["to_s3"]))
                 if EXPERIMENT == 5: return p["to_s2"] if self._is_link_s1_s2_up() else p["to_s3"]
                 return p["to_s2"]
-            return p["to_h1"] if h2_to_h1 else None
-
+            if h2_to_h1: return p["to_h1"]
         if dpid == 4:
             if h2_to_h1:
-                if EXPERIMENT == 4: return random.choice([p["to_s2"], p["to_s3"]])
+                if EXPERIMENT == 4: return self._choose_ecmp_port(dpid, (p["to_s2"], p["to_s3"]))
                 if EXPERIMENT == 5: return p["to_s2"] if self._is_link_s1_s2_up() else p["to_s3"]
                 return p["to_s2"]
-            return p["to_h2"] if h1_to_h2 else None
-
-        if dpid == 2: return p["to_s4"] if h1_to_h2 else (p["to_s1"] if h2_to_h1 else None)
-        if dpid == 3: return p["to_s4"] if h1_to_h2 else (p["to_s1"] if h2_to_h1 else None)
+            if h1_to_h2: return p["to_h2"]
+        if dpid == 2:
+            if h1_to_h2: return p["to_s4"]
+            if h2_to_h1:
+                if EXPERIMENT == 5 and not self._is_port_up(dpid, p["to_s1"]): return None
+                return p["to_s1"]
+        if dpid == 3:
+            if h1_to_h2: return p["to_s4"]
+            if h2_to_h1: return p["to_s1"]
         return None
 
-    def _get_quic_match(self, parser, eth_src, eth_dst):
-        if eth_src == H1_MAC: # Servidor -> Cliente
+    def _is_quic_packet(self, pkt: packet.Packet) -> bool:
+        ip = pkt.get_protocol(ipv4.ipv4)
+        if ip is None or ip.proto != 17: return False
+        u = pkt.get_protocol(udp.udp)
+        if u is None: return False
+        return (u.dst_port == QUIC_UDP_PORT) or (u.src_port == QUIC_UDP_PORT)
+
+    def _quic_direction_match(self, parser, eth_src: str, eth_dst: str):
+        if eth_src == H2_MAC and eth_dst == H1_MAC:
+            return parser.OFPMatch(eth_type=0x0800, ip_proto=17, eth_src=H2_MAC, eth_dst=H1_MAC, udp_dst=QUIC_UDP_PORT)
+        if eth_src == H1_MAC and eth_dst == H2_MAC:
             return parser.OFPMatch(eth_type=0x0800, ip_proto=17, eth_src=H1_MAC, eth_dst=H2_MAC, udp_src=QUIC_UDP_PORT)
-        return parser.OFPMatch(eth_type=0x0800, ip_proto=17, eth_src=H2_MAC, eth_dst=H1_MAC, udp_dst=QUIC_UDP_PORT)
+        return None
 
-    def _reprogram_exp5(self):
+    def _reprogram_quic_exp5(self):
         if EXPERIMENT != 5: return
-        self.logger.info("[SDN] Link s1-s2 status mudou. Reprogramando...")
-        for dp in self.datapaths.values():
-            self.del_flow(dp, dp.ofproto_parser.OFPMatch(eth_type=0x0800, ip_proto=17))
+        link_up = self._is_link_s1_s2_up()
+        self.logger.info("[SDN] Exp.5: reprogramando QUIC (link s1-s2 UP=%s)", link_up)
+        for dpid, dp in list(self.datapaths.items()):
+            parser = dp.ofproto_parser
+            self.del_flow(dp, parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_dst=QUIC_UDP_PORT))
+            self.del_flow(dp, parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_src=QUIC_UDP_PORT))
+            out_port_c2s = self._route_quic_out_port(dpid, H2_MAC, H1_MAC, in_port=0)
+            if out_port_c2s is not None:
+                self.add_flow(dp, 300, self._quic_direction_match(parser, H2_MAC, H1_MAC), [parser.OFPActionOutput(out_port_c2s)])
+            out_port_s2c = self._route_quic_out_port(dpid, H1_MAC, H2_MAC, in_port=0)
+            if out_port_s2c is not None:
+                self.add_flow(dp, 300, self._quic_direction_match(parser, H1_MAC, H2_MAC), [parser.OFPActionOutput(out_port_s2c)])
 
-    # --- Handlers de Eventos ---
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
         self.datapaths[datapath.id] = datapath
-        match = datapath.ofproto_parser.OFPMatch()
-        actions = [datapath.ofproto_parser.OFPActionOutput(datapath.ofproto.OFPP_CONTROLLER, datapath.ofproto.OFPCML_NO_BUFFER)]
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
+        self.logger.info("Table-miss instalada para switch %s", datapath.id)
+        if EXPERIMENT == 5: self._reprogram_quic_exp5()
 
     @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
     def port_status_handler(self, ev):
         msg = ev.msg
-        self.port_state[(msg.datapath.id, msg.desc.port_no)] = not bool(msg.desc.state & msg.datapath.ofproto.OFPPS_LINK_DOWN)
-        if (msg.datapath.id in [1, 2]): self._reprogram_exp5()
+        datapath = msg.datapath
+        dpid = datapath.id
+        port_no = msg.desc.port_no
+        link_down = bool(msg.desc.state & datapath.ofproto.OFPPS_LINK_DOWN)
+        self.port_state[(dpid, port_no)] = (not link_down)
+        if link_down: self.logger.info("[PORT] dpid=%s port=%s => DOWN", dpid, port_no)
+        else: self.logger.info("[PORT] dpid=%s port=%s => UP", dpid, port_no)
+        if EXPERIMENT == 5:
+            s1_to_s2 = self.ports[1]["to_s2"]
+            s2_to_s1 = self.ports[2]["to_s1"]
+            if (dpid == 1 and port_no == s1_to_s2) or (dpid == 2 and port_no == s2_to_s1):
+                self._reprogram_quic_exp5()
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
         datapath = msg.datapath
+        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        in_port = msg.match['in_port']
+        in_port = msg.match["in_port"]
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP: return
+        if eth.ethertype == 0x88CC: return
+        dst, src = eth.dst, eth.src
+        self.logger.info("PACKET_IN dpid=%s src=%s dst=%s in_port=%s", datapath.id, src, dst, in_port)
+        self.mac_to_port.setdefault(datapath.id, {})
+        self.mac_to_port[datapath.id][src] = in_port
 
-        dpid = datapath.id
-        self.mac_to_port.setdefault(dpid, {})
-        self.mac_to_port[dpid][eth.src] = in_port
-
-        # Lógica QUIC
-        ip = pkt.get_protocol(ipv4.ipv4)
-        udp_pkt = pkt.get_protocol(udp.udp)
-        if ip and udp_pkt and (udp_pkt.src_port == QUIC_UDP_PORT or udp_pkt.dst_port == QUIC_UDP_PORT):
-            out_port = self._route_quic(dpid, eth.src, eth.dst)
-            if out_port:
+        if self._is_quic_packet(pkt):
+            out_port = self._route_quic_out_port(datapath.id, eth_src=src, eth_dst=dst, in_port=in_port)
+            if out_port is not None:
                 actions = [parser.OFPActionOutput(out_port)]
-                h_timeout = 1 if EXPERIMENT == 4 else 0
-                self.add_flow(datapath, 200, self._get_quic_match(parser, eth.src, eth.dst), actions, hard_timeout=h_timeout)
-                self.send_packet_out(datapath, msg, in_port, actions)
+                match = self._quic_direction_match(parser, eth_src=src, eth_dst=dst)
+                if match is not None:
+                    h_timeout = 1 if EXPERIMENT == 4 else 0
+                    self.add_flow(datapath, 200, match, actions, hard_timeout=h_timeout)
+                self._packet_out(datapath, msg, in_port, actions)
                 return
 
-        # Learning Switch (Baseline)
-        out_port = self.mac_to_port[dpid].get(eth.dst, datapath.ofproto.OFPP_FLOOD)
+        if dst in self.mac_to_port[datapath.id]:
+            out_port = self.mac_to_port[datapath.id][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
         actions = [parser.OFPActionOutput(out_port)]
-        if out_port != datapath.ofproto.OFPP_FLOOD:
-            self.add_flow(datapath, 1, parser.OFPMatch(in_port=in_port, eth_dst=eth.dst), actions)
-        self.send_packet_out(datapath, msg, in_port, actions)
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            self.add_flow(datapath, 1, match, actions, msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None)
+        self._packet_out(datapath, msg, in_port, actions)
