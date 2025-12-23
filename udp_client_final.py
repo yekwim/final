@@ -53,7 +53,7 @@ def send_and_wait_ack(pkt, server_addr):
             rtt = recv_time - send_time
 
             resp = json.loads(data.decode())
-            if resp.get("type") == "ack" and resp.get("seq") == seq:
+            if resp.get("type") in ("ack", "ack_chunk") and resp.get("seq") == seq:
                 print(f"[ACK OK] seq={seq}, rtt={rtt:.3f}s, resp={resp}")
                 return True, rtt
             else:
